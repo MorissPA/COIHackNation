@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kreator e-Usług • COI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Plus+Jakarta+Sans:wght@600;700&display=swap" rel="stylesheet">
+  <style>body{background:#F5F3EF;color:#1C1917;font-family:Inter,sans-serif}.heading{font-family:'Plus Jakarta Sans',sans-serif}</style>
+</head>
+<body class="min-h-screen">
+<header class="h-16 bg-white border-b border-stone-200 px-6 flex items-center justify-between">
+  <div class="flex items-center gap-3"><div class="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold">COI</div><div><b class="heading">Kreator e-Usług</b><p class="text-xs text-stone-500">Przyjazna cyfryzacja wniosków</p></div></div>
+  <button id="uploadTop" class="rounded-xl bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 text-sm font-semibold">Wgraj wniosek</button>
+</header>
+<main class="grid lg:grid-cols-[42%_58%] min-h-[calc(100vh-64px)]">
+  <section class="border-r border-stone-200 bg-stone-100 p-6">
+    <h2 class="heading font-bold mb-4">Dokument źródłowy</h2>
+    <label id="drop" class="block border-2 border-dashed border-stone-300 rounded-2xl p-8 text-center bg-white cursor-pointer hover:border-blue-500">
+      <input id="file" type="file" class="hidden" accept=".pdf,.doc,.docx,.ods,.xlsx,.jpg,.jpeg,.png">
+      <b class="heading">Kliknij lub upuść formularz</b><p class="text-sm text-stone-500 mt-2">PDF, DOC/DOCX, ODS/XLSX, JPG/PNG • do 15 MB</p>
+    </label>
+    <div id="status" class="hidden mt-4 rounded-xl border p-3 text-sm"></div>
+  </section>
+  <section class="p-6">
+    <div class="bg-white rounded-2xl border border-stone-200 shadow-sm">
+      <div class="border-b border-stone-200 px-5 py-3 flex gap-2"><button class="tab rounded-xl px-4 py-2 text-sm font-semibold bg-stone-900 text-white" data-tab="editor">1. Kreator</button><button class="tab rounded-xl px-4 py-2 text-sm font-semibold text-stone-500" data-tab="preview">2. Podgląd</button><button class="tab rounded-xl px-4 py-2 text-sm font-semibold text-stone-500" data-tab="json">3. JSON</button></div>
+      <div id="editor" class="p-5"><p class="text-sm text-stone-500">Po wgraniu formularza tutaj pojawi się rozpoznana struktura pól.</p><div id="fields" class="mt-4 space-y-3"></div></div>
+      <div id="preview" class="hidden p-5"><h2 id="previewTitle" class="heading text-xl font-bold"></h2><div id="previewFields" class="mt-5 space-y-4"></div></div>
+      <pre id="json" class="hidden p-5 overflow-auto max-h-[70vh] text-xs bg-stone-50"></pre>
+    </div>
+  </section>
+</main>
+<script>
+let result=null;
+const $=s=>document.querySelector(s);
+const tabs=document.querySelectorAll('.tab');
+tabs.forEach(b=>b.onclick=()=>{tabs.forEach(t=>t.className='tab rounded-xl px-4 py-2 text-sm font-semibold text-stone-500');b.className='tab rounded-xl px-4 py-2 text-sm font-semibold bg-stone-900 text-white';['editor','preview','json'].forEach(id=>$('#'+id).classList.toggle('hidden',id!==b.dataset.tab))});
+$('#uploadTop').onclick=()=>$('#file').click();
+$('#file').onchange=e=>e.target.files[0]&&upload(e.target.files[0]);
+$('#drop').ondragover=e=>e.preventDefault();
+$('#drop').ondrop=e=>{e.preventDefault();e.dataTransfer.files[0]&&upload(e.dataTransfer.files[0])};
+async function upload(file){
+ const st=$('#status');st.classList.remove('hidden');st.className='mt-4 rounded-xl border p-3 text-sm bg-blue-50 border-blue-200 text-blue-800';st.textContent='Analizowanie formularza…';
+ const form=new FormData();form.append('file',file);
+ try{const r=await fetch('/api/v1/forms/analyze',{method:'POST',body:form});const body=await r.json();if(!r.ok)throw new Error(body.detail||'Błąd przetwarzania');result=body;st.className='mt-4 rounded-xl border p-3 text-sm bg-green-50 border-green-200 text-green-800';st.textContent='Rozpoznano strukturę formularza.';render()}catch(e){st.className='mt-4 rounded-xl border p-3 text-sm bg-red-50 border-red-200 text-red-800';st.textContent=e.message}
+}
+function esc(v){const d=document.createElement('div');d.textContent=v==null?'':v;return d.innerHTML}
+function render(){
+ $('#json').textContent=JSON.stringify(result,null,2);
+ $('#previewTitle').textContent=result.serviceMetadata.title;
+ $('#fields').innerHTML=result.pages.flatMap(p=>p.fields).map((f,i)=>`<div class="rounded-xl border border-stone-200 p-4"><div class="text-xs text-stone-500">Pole ${i+1}</div><input class="mt-1 w-full border border-stone-200 rounded-lg px-3 py-2 text-sm" value="${esc(f.label)}"><div class="mt-2 flex gap-2 text-xs"><span class="rounded-full bg-green-100 text-green-700 px-2 py-1">${esc(f.type)}</span>${f.validation?`<span class="rounded-full bg-blue-100 text-blue-700 px-2 py-1">${esc(f.validation)}</span>`:''}${f.dictionaryRef?`<span class="rounded-full bg-amber-100 text-amber-800 px-2 py-1">${esc(f.dictionaryRef)}</span>`:''}</div></div>`).join('');
+ $('#previewFields').innerHTML=result.pages.flatMap(p=>p.fields).map(f=>f.type==='checkbox'?`<label class="flex gap-2"><input type="checkbox"> ${esc(f.label)}</label>`:f.type==='date'?`<label class="block text-sm font-semibold">${esc(f.label)}<input type="date" class="block mt-1 w-full border border-stone-300 rounded-xl px-3 py-2"></label>`:`<label class="block text-sm font-semibold">${esc(f.label)}<input class="block mt-1 w-full border border-stone-300 rounded-xl px-3 py-2"></label>`).join('')
+}
+</script>
+</body>
+</html>
