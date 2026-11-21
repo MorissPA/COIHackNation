@@ -13,8 +13,19 @@ import zipfile
 app = FastAPI(title="Kreator e-Usług COI", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(15 * 1024 * 1024)))
-FORBIDDEN_FILENAME_CHARS = set(';:><\\/|\'*%$')
+def read_max_upload_size() -> int:
+    raw = os.getenv("MAX_UPLOAD_SIZE", str(15 * 1024 * 1024))
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError("MAX_UPLOAD_SIZE musi być dodatnią liczbą całkowitą.")
+    if value <= 0:
+        raise RuntimeError("MAX_UPLOAD_SIZE musi być większe od zera.")
+    return value
+
+
+MAX_UPLOAD_SIZE = read_max_upload_size()
+FORBIDDEN_FILENAME_CHARS = set(";:><\\/|'*%$")
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "ods", "xlsx", "jpg", "jpeg", "png"}
 
 
@@ -45,7 +56,9 @@ class Result(BaseModel):
 def validate_name(name: str) -> None:
     if len(name) > 250:
         raise HTTPException(status_code=400, detail="Nazwa pliku przekracza 250 znaków.")
-    if any(char in FORBIDDEN_FILENAME_CHARS for char in name):
+    if any(char in FORBIDDEN_FILENAME_CHARS for char in name) or any(
+        ord(char) < 32 for char in name
+    ):
         raise HTTPException(status_code=400, detail="Nazwa pliku zawiera niedozwolony znak.")
 
 
@@ -54,17 +67,49 @@ def detect_format(filename: str, data: bytes) -> str:
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=415, detail=f"Nieobsługiwany typ pliku: .{ext}")
 
-    signatures = {
-        "pdf": data.startswith(b"%PDF-"),
-        "doc": data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"),
-        "docx": ext == "docx" and data.startswith(b"PK") and zipfile.is_zipfile(io.BytesIO(data)),
-        "ods": ext == "ods" and data.startswith(b"PK") and zipfile.is_zipfile(io.BytesIO(data)),
-        "xlsx": ext == "xlsx" and data.startswith(b"PK") and zipfile.is_zipfile(io.BytesIO(data)),
-        "jpg": data.startswith(b"\xff\xd8\xff"),
-        "jpeg": data.startswith(b"\xff\xd8\xff"),
-        "png": data.startswith(b"\x89PNG\r\n\x1a\n"),
-    }
-    if not signatures.get(ext, False):
+    matches = False
+    if ext == "pdf":
+        matches = data.startswith(b"%PDF-")
+    elif ext == "doc":
+        matches = data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    elif ext in {"docx", "ods", "xlsx"}:
+        matches = data.startswith(b"PK") and zipfile.is_zipfile(io.BytesIO(data))
+        if matches:
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    names = set(archive.namelist())
+                    if ext == "docx":
+                        matches = "[Content_Types].xml" in names and any(
+                            name.startswith("word/") for name in names
+                        )
+                    elif ext == "xlsx":
+                        matches = "[Content_Types].xml" in names and any(
+                            name.startswith("xl/") for name in names
+                        )
+                    else:
+                        mimetype = archive.read("mimetype") if "mimetype" in names else b""
+                        matches = mimetype.startswith(b"application/vnd.oasis.opendocument")
+            except (KeyError, zipfile.BadZipFile, OSError):
+                matches = False
+    elif ext in {"jpg", "jpeg", "png"}:
+        expected_signature = (
+            data.startswith(b"\xff\xd8\xff")
+            if ext in {"jpg", "jpeg"}
+            else data.startswith(b"\x89PNG\r\n\x1a\n")
+        )
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(data)) as image:
+                image.verify()
+                detected_format = image.format
+            matches = expected_signature and (
+                (ext in {"jpg", "jpeg"} and detected_format == "JPEG")
+                or (ext == "png" and detected_format == "PNG")
+            )
+        except Exception:
+            matches = expected_signature
+
+    if not matches:
         raise HTTPException(status_code=415, detail="MIME: zawartość pliku nie odpowiada rozszerzeniu.")
     return ext
 
@@ -99,12 +144,24 @@ def extract_text(data: bytes, fmt: str) -> str:
     if fmt == "ods":
         try:
             from odf.opendocument import load
-            from odf.table import Table, TableRow, TableCell
-            from odf.text import P
+            from odf.text import P, H
+
             document = load(io.BytesIO(data))
             parts: list[str] = []
-            for paragraph in document.getElementsByType(P):
-                parts.append("".join(str(child) for child in paragraph.childNodes))
+            for paragraph in document.getElementsByType(P) + document.getElementsByType(H):
+                text_parts: list[str] = []
+
+                def collect(node: Any) -> None:
+                    if getattr(node, "nodeType", None) == 3:
+                        text_parts.append(str(node.data))
+                    elif getattr(node, "childNodes", None):
+                        for child in node.childNodes:
+                            collect(child)
+
+                collect(paragraph)
+                text = "".join(text_parts).strip()
+                if text:
+                    parts.append(text)
             return "\n".join(parts)
         except Exception:
             return ""
@@ -203,11 +260,20 @@ async def analyze_form(file: UploadFile = File(...)) -> Result:
     return heuristic_extract(text, file.filename, fmt)
 
 
+frontend_dir = os.getenv("FRONTEND_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "frontend"
+)
+if not os.path.isdir(frontend_dir):
+    frontend_dir = "/app/frontend"
+
+
 @app.get("/")
 def frontend() -> FileResponse:
-    return FileResponse("/app/frontend/index.html")
+    index_path = os.path.join(frontend_dir, "index.html")
+    if not os.path.isfile(index_path):
+        raise HTTPException(status_code=404, detail="Interfejs frontend nie jest dostępny.")
+    return FileResponse(index_path)
 
 
-static_dir = "/app/frontend"
-if os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+if os.path.isdir(frontend_dir):
+    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
